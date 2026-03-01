@@ -134,3 +134,57 @@ for epoch in range(epochs):
     if val_acc > best_acc:
         best_acc = val_acc
         torch.save(model.state_dict(), '../classification/classifier_model/best.pt')
+
+
+
+
+
+inference
+----------------------------
+import cv2
+import torch
+import timm
+from torchvision import transforms
+from ultralytics import YOLO
+from PIL import Image
+
+# Load YOLO26m
+det_model = YOLO('../detection/yolo26m_model/best.pt')
+
+# Load classifier
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+clf_model = timm.create_model('efficientnet_b3', pretrained=False, num_classes=2)
+clf_model.load_state_dict(torch.load('../classification/classifier_model/best.pt'))
+clf_model.to(device)
+clf_model.eval()
+
+# Transform
+transform = transforms.Compose([
+    transforms.Resize((380,380)),
+    transforms.ToTensor()
+])
+
+def predict_image(image_path, threshold=0.5):
+    img = cv2.imread(image_path)
+    results = det_model.predict(image_path, conf=0.5)
+
+    any_damaged = False
+
+    for box in results[0].boxes.xyxy:
+        x1, y1, x2, y2 = map(int, box)
+        crop = img[y1:y2, x1:x2]
+        crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        crop_tensor = transform(crop_pil).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            output = clf_model(crop_tensor)
+            prob = torch.softmax(output, dim=1)[0][1].item()  # Damaged probability
+
+        if prob >= threshold:
+            any_damaged = True
+
+    return "Damaged" if any_damaged else "Healthy"
+
+# Test
+img_path = '../dataset/images/test/sample.jpg'
+print(predict_image(img_path, threshold=0.55))  # adjust threshold after tuning
