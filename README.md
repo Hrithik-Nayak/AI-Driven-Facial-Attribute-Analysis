@@ -1,90 +1,136 @@
-https://drive.google.com/drive/folders/1oKgSYnDKTtlovW3erNK6RI9puN5w7uqH?usp=sharing
+detection
+------------------------
+from ultralytics import YOLO
 
+# Load pre-trained YOLO26m weights
+model = YOLO('yolov8m.pt')  # you can switch to YOLO26m weights if available
 
+# Train detection
+model.train(
+    data='../dataset/annotations/data.yaml',
+    epochs=150,            # longer training for high accuracy
+    imgsz=960,             # higher resolution for small lamp detection
+    batch=16,              # adjust based on GPU memory
+    optimizer='AdamW',     # better for stability
+    lr0=0.001,             # initial learning rate
+    lr_scheduler='cosine', # smoother convergence
+    name='yolo26m_lamp',
+    device=0,
+    augment=True,          # include mosaic, flips, color jitter
+    patience=20,           # early stopping if no improvement
+    save_period=5          # save checkpoints every 5 epochs
+)
 
-
-
+cropping
+-------------------------------------
 import cv2
+from ultralytics import YOLO
+import os
+from pathlib import Path
+
+# Load trained YOLO26m
+model = YOLO('../detection/yolo26m_model/best.pt')
+
+input_folder = '../dataset/images/train'  # change per split
+output_folder = '../dataset/crops/train/'
+
+os.makedirs(output_folder, exist_ok=True)
+
+for img_name in os.listdir(input_folder):
+    img_path = os.path.join(input_folder, img_name)
+    results = model.predict(img_path, conf=0.5)
+
+    img = cv2.imread(img_path)
+
+    for i, box in enumerate(results[0].boxes.xyxy):
+        x1, y1, x2, y2 = map(int, box)
+        crop = img[y1:y2, x1:x2]
+        crop_name = f"{Path(img_name).stem}_lamp{i}.jpg"
+        cv2.imwrite(os.path.join(output_folder, crop_name), crop)
 
 
 
-def faceBox(faceNet,frame):
-    print(frame)
-    frameWidth = frame.shape[1]
-    frameHeight = frame.shape[0]
-    blob = cv2.dnn.blobFromImage(frame,1.0,(227,227),[104,117,123],swapRB=False)
-    faceNet.setInput(blob)
-    detection = faceNet.forward()
-    bboxs = []
-    for i in range(detection.shape[2]):
-        confidence = detection[0,0,i,2]
-        if confidence > 0.8:
-            x1 = int(detection[0,0,i,3] * frameWidth)
-            y1 = int(detection[0,0,i,4] * frameHeight)
-            x2 = int(detection[0,0,i,5] * frameWidth)
-            y2 = int(detection[0,0,i,6] * frameHeight)
-            bboxs.append([x1,y1,x2,y2])
-            cv2.rectangle(frame,(x1,y1),(x2,y2),(0,255,0),1)
-    return frame, bboxs
+main model
+----------------------------
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+import timm
+import os
 
+# Paths
+train_dir = '../dataset/crops/train'
+val_dir = '../dataset/crops/val'
 
+# Data Augmentation
+train_transforms = transforms.Compose([
+    transforms.Resize((380,380)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
+    transforms.RandomRotation(10),
+    transforms.RandomAffine(degrees=0, translate=(0.1,0.1)),
+    transforms.ToTensor(),
+])
 
+val_transforms = transforms.Compose([
+    transforms.Resize((380,380)),
+    transforms.ToTensor()
+])
 
-faceProto = "opencv_face_detector.pbtxt"
-faceMOdel = "opencv_face_detector_uint8.pb"
+# Datasets
+train_dataset = datasets.ImageFolder(train_dir, transform=train_transforms)
+val_dataset = datasets.ImageFolder(val_dir, transform=val_transforms)
 
-ageProto = "age_deploy.prototxt"
-ageModel = "age_net.caffemodel"
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
 
-genderProto = "gender_deploy.prototxt"
-genderModel = "gender_net.caffemodel"
+# Model
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = timm.create_model('efficientnet_b3', pretrained=True, num_classes=2)
+model.to(device)
 
+# Loss and optimizer
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
 
+# Training Loop
+best_acc = 0
+epochs = 50
 
-faceNet = cv2.dnn.readNet(faceMOdel,faceProto)
-ageNet = cv2.dnn.readNet(ageModel,ageProto)
-genderNet = cv2.dnn.readNet(genderModel,genderProto)
+for epoch in range(epochs):
+    model.train()
+    total_loss = 0
+    correct = 0
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+        correct += (outputs.argmax(1) == labels).sum().item()
 
+    train_acc = correct / len(train_dataset)
+    print(f"Epoch {epoch+1}, Loss: {total_loss:.4f}, Train Acc: {train_acc:.4f}")
 
-MODEL_MEAN_VALUES = (78.4263377603, 87.7689143744, 114.895847746)
-# ageList = ['(0-2)', '(4-6)', '(8-12)', '(15-20)', '(21-25)', '(26-30)', '(31-35)','(36-40)', '(41-45)', '(46-50)', '(51-55)', '(56-60)', '(61-65)', '(66-70)', '(71-75)', '(76-80)', '(81-85)', '(86-90)', '(91-95)', '(96-100)']
-ageList = [('2-17'),('18-20'),('21-22'), ('23-24'), ('25-26'), ('27-28'), ('29-30'),
-('31-32'), ('33-34'), ('35-36'), ('37-38'), ('39-40'),
-('41-42'), ('43-44'), ('45-46'), ('47-48'), ('49-50'),
-('51-52'), ('53-54'), ('55-56'), ('57-58'), ('59-60'),
-('61-62'), ('63-64'), ('65-66'), ('67-68'), ('69-70'),
-('71-72'), ('73-74'), ('75-76'), ('77-78'), ('79-80'),
-('81-82'), ('83-84'), ('85-86'), ('87-88'), ('89-90'),
-('91-92'), ('93-94'), ('95-96'), ('97-98'), ('99-100')
-]
-genderList = ['Male','Female']
+    # Validation
+    model.eval()
+    val_correct = 0
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            val_correct += (outputs.argmax(1) == labels).sum().item()
+    val_acc = val_correct / len(val_dataset)
+    print(f"Validation Acc: {val_acc:.4f}")
 
-video = cv2.VideoCapture(0)
+    # Scheduler step
+    scheduler.step()
 
-while True:
-    ret,frame=video.read()
-    frame, bboxs = faceBox(faceNet,frame)
-    for bbox in bboxs:
-        # face = frame[bbox[1]:bbox[3],bbox[0]:bbox[2]]
-        face = frame[max(0,bbox[1]-10):min(bbox[3]+10,frame.shape[0]-1),max(0,bbox[0]-10):min(bbox[2]+10,frame.shape[1]-1)]
-        blob = cv2.dnn.blobFromImage(face, 1.0, (227,227), MODEL_MEAN_VALUES, swapRB=False)
-        genderNet.setInput(blob)
-        genderPreds = genderNet.forward()
-        gender = genderList[genderPreds[0].argmax()]
-
-        ageNet.setInput(blob)
-        agePreds = ageNet.forward()
-        age = ageList[agePreds[0].argmax()]
-
-        label = "{}, {}".format(gender, age)
-        cv2.rectangle(frame,(bbox[0],bbox[1]-30),(bbox[2],bbox[1]),(0,255,0),-1)    
-        cv2.putText(frame,label,(bbox[0],bbox[1]-10),cv2.FONT_HERSHEY_SIMPLEX,0.8,(255,255,255),2,cv2.LINE_AA)
-
-
-    cv2.imshow("Age-Gender",frame)
-    k = cv2.waitKey(1)
-    if k == ord('q'):
-        break
-
-video.release()
-cv2.destroyAllWindows()
+    # Save best model
+    if val_acc > best_acc:
+        best_acc = val_acc
+        torch.save(model.state_dict(), '../classification/classifier_model/best.pt')
